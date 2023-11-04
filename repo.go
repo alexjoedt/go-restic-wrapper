@@ -18,6 +18,9 @@ import (
 	"github.com/alexjoedt/go-restic-wrapper/restore"
 )
 
+// TODO:
+// implement support for S3 and Rest
+
 type Repository struct {
 	path     string
 	password string
