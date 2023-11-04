@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
+	"strings"
+
+	"github.com/hashicorp/go-version"
 )
 
 const (
@@ -28,10 +30,23 @@ func init() {
 		os.Exit(1)
 	}
 
-	versionRegex := regexp.MustCompile(minVersion)
-	if !versionRegex.MatchString(string(out)) {
+	fields := strings.Fields(string(out))
+	v, err := version.NewVersion(fields[1])
+	must(err)
+
+	minV, err := version.NewVersion(minVersion)
+	must(err)
+
+	if v.LessThan(minV) {
 		fmt.Printf("[FATAL] restic must be minimum version %s\n", minVersion)
 		os.Exit(1)
 	}
 
+}
+
+func must(err error) {
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }
