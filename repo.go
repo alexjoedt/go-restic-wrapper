@@ -12,10 +12,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/alexjoedt/go-restic/backup"
-	"github.com/alexjoedt/go-restic/filter"
-	"github.com/alexjoedt/go-restic/forget"
-	"github.com/alexjoedt/go-restic/restore"
+	"github.com/alexjoedt/go-restic-wrapper/backup"
+	"github.com/alexjoedt/go-restic-wrapper/filter"
+	"github.com/alexjoedt/go-restic-wrapper/forget"
+	"github.com/alexjoedt/go-restic-wrapper/restore"
 )
 
 type Repository struct {

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/alexjoedt/go-restic/restic"
-	"github.com/alexjoedt/go-restic/restic/forget"
+	"github.com/alexjoedt/go-restic-wrapper/restic"
+	"github.com/alexjoedt/go-restic-wrapper/restic/forget"
 )
 
 func main() {
