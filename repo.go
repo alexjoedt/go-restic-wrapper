@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -116,6 +117,30 @@ func (r *Repository) Snapshots(ctx context.Context, filters ...filter.OptionFunc
 	}
 
 	return snapshots, nil
+}
+
+// SnapshotById returns the snapshot with given id from the repository
+func (r *Repository) SnapshotById(ctx context.Context, id string) (*Snapshot, error) {
+
+	args := []string{"snapshots", "--json"}
+	args = append(args, id)
+
+	sn, err := r.command(ctx, "", args...)
+	if err != nil {
+		return nil, err
+	}
+
+	var snapshots []*Snapshot
+	err = json.Unmarshal([]byte(sn), &snapshots)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(snapshots) < 1 {
+		return nil, fmt.Errorf("no snapshot wiht id '%s'", id)
+	}
+
+	return snapshots[0], nil
 }
 
 var (
