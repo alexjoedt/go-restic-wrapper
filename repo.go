@@ -198,6 +198,19 @@ func (r *Repository) Forget(ctx context.Context, options ...forget.OptionFunc) (
 	return summary, nil
 }
 
+// Unlock remove locks other processes created on the repository
+func (r *Repository) Unlock(ctx context.Context) error {
+
+	args := []string{"unlock", "--json"}
+
+	_, err := r.command(ctx, "", args...)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // command wraps the restic command and injects repo and password as environment variables to the process
 func (r *Repository) command(ctx context.Context, dir string, args ...string) (string, error) {
 
