@@ -199,8 +199,8 @@ func (r *Repository) Forget(ctx context.Context, options ...forget.OptionFunc) (
 	}
 
 	args := []string{
+		"--json", // json output seems not supported yet, so there is no output with exit 0
 		"forget",
-		"--json",
 	}
 
 	args = append(args, forget.Args(options...)...)
@@ -217,7 +217,8 @@ func (r *Repository) Forget(ctx context.Context, options ...forget.OptionFunc) (
 	var summary []ForgetSummary
 	err = json.Unmarshal(data, &summary)
 	if err != nil {
-		return nil, err
+		// as long --json is not supported on forget, we return nil, nil
+		return nil, nil
 	}
 
 	return summary, nil
