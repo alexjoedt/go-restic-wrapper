@@ -249,6 +249,8 @@ func (r *Repository) command(ctx context.Context, dir string, args ...string) (s
 		envArgs = append(envArgs, "HOME="+home)
 	}
 
+	envArgs = append(envArgs, "PATH="+os.Getenv("PATH"))
+
 	// buffers for output
 	stdErr := new(bytes.Buffer)
 	stdOut := new(bytes.Buffer)
