@@ -103,7 +103,7 @@ func (r *Repository) Backup(ctx context.Context, path string, options ...backup.
 // Fetches Snapshots in read only mode (--no-lock)
 func (r *Repository) Snapshots(ctx context.Context, filters ...filter.OptionFunc) ([]Snapshot, error) {
 
-	args := []string{"snapshots", "--json"}
+	args := []string{"--no-lock", "snapshots", "--json"}
 	args = append(args, filter.Args(filters...)...)
 
 	sn, err := r.command(ctx, "", args...)
