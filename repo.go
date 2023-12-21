@@ -279,6 +279,7 @@ func (r *Repository) command(ctx context.Context, dir string, args ...string) (s
 var (
 	ErrRepoAlreadyExist error = errors.New("restic repo already exist, use restic.Connect")
 	ErrInvalidID        error = errors.New("invalid snapshot ID")
+	ErrRepoLocked       error = errors.New("repository is already locked")
 )
 
 // parseStdErr parses the stderr output from the restic command
@@ -286,6 +287,10 @@ func parseStdErr(stdErr string) error {
 	switch {
 	case strings.Contains(stdErr, "failed: config file already exists"):
 		return ErrRepoAlreadyExist
+	case strings.Contains(stdErr, "returned error, retrying after"):
+		return ErrInvalidID
+	case strings.Contains(stdErr, "unable to create lock in backend: repository is already locked"):
+		return ErrRepoLocked
 	}
 
 	return errors.New(stdErr)
