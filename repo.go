@@ -99,7 +99,8 @@ func (r *Repository) Backup(ctx context.Context, path string, options ...backup.
 	return &summary, nil
 }
 
-// Snapshots returns snapshots from the repository
+// Snapshots returns snapshots from the repository.
+// Fetches Snapshots in read only mode (--no-lock)
 func (r *Repository) Snapshots(ctx context.Context, filters ...filter.OptionFunc) ([]Snapshot, error) {
 
 	args := []string{"snapshots", "--json"}
