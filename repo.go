@@ -227,8 +227,8 @@ func (r *Repository) Forget(ctx context.Context, options ...forget.OptionFunc) (
 
 // Unlock remove locks other processes created on the repository
 func (r *Repository) Unlock(ctx context.Context) error {
-
-	args := []string{"unlock", "--json"}
+	// TODO: remove all as option
+	args := []string{"unlock", "--remove-all", "--json"}
 
 	_, err := r.command(ctx, "", args...)
 	if err != nil {
