@@ -2,9 +2,9 @@ package restic
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/hashicorp/go-version"
 )
@@ -14,39 +14,56 @@ const (
 	minVersion string = "0.16.0"
 )
 
-func init() {
-	_, err := exec.LookPath(resticBin)
-	if err != nil {
-		fmt.Printf("[FATAL] %v\n", err)
-		fmt.Printf("[FATAL] restic must be installed and exported in $PATH\n")
-		fmt.Printf("[FATAL] https://restic.readthedocs.io/en/latest/020_installation.html\n")
-		os.Exit(1)
-	}
+var (
+	// resticCheckOnce ensures version check happens only once
+	resticCheckOnce sync.Once
+	// resticCheckErr stores the result of version check
+	resticCheckErr error
+)
 
-	cmd := exec.Command(resticBin, "version")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("[FATAL] %v\n", err)
-		os.Exit(1)
-	}
+// checkResticVersion verifies that restic binary exists and meets minimum version.
+// This check is performed lazily on first use and cached for subsequent calls.
+func checkResticVersion() error {
+	resticCheckOnce.Do(func() {
+		// Check if restic binary exists in PATH
+		_, err := exec.LookPath(resticBin)
+		if err != nil {
+			resticCheckErr = fmt.Errorf("restic not found in PATH: %w (install from https://restic.readthedocs.io/en/latest/020_installation.html)", err)
+			return
+		}
 
-	fields := strings.Fields(string(out))
-	v, err := version.NewVersion(fields[1])
-	must(err)
+		// Get restic version
+		cmd := exec.Command(resticBin, "version")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			resticCheckErr = fmt.Errorf("failed to get restic version: %w", err)
+			return
+		}
 
-	minV, err := version.NewVersion(minVersion)
-	must(err)
+		// Parse version string (format: "restic 0.16.0 compiled with go1.21.0...")
+		fields := strings.Fields(string(out))
+		if len(fields) < 2 {
+			resticCheckErr = fmt.Errorf("unexpected restic version output: %s", string(out))
+			return
+		}
 
-	if v.LessThan(minV) {
-		fmt.Printf("[FATAL] restic must be minimum version %s\n", minVersion)
-		os.Exit(1)
-	}
+		v, err := version.NewVersion(fields[1])
+		if err != nil {
+			resticCheckErr = fmt.Errorf("failed to parse restic version %q: %w", fields[1], err)
+			return
+		}
 
-}
+		minV, err := version.NewVersion(minVersion)
+		if err != nil {
+			resticCheckErr = fmt.Errorf("invalid minimum version %q: %w", minVersion, err)
+			return
+		}
 
-func must(err error) {
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+		if v.LessThan(minV) {
+			resticCheckErr = fmt.Errorf("restic version %s is too old, minimum required version is %s", v.String(), minVersion)
+			return
+		}
+	})
+
+	return resticCheckErr
 }

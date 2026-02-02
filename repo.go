@@ -7,46 +7,48 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
-
-	"github.com/alexjoedt/go-restic-wrapper/backup"
-	"github.com/alexjoedt/go-restic-wrapper/filter"
-	"github.com/alexjoedt/go-restic-wrapper/forget"
-	"github.com/alexjoedt/go-restic-wrapper/restore"
 )
 
 // TODO:
-// implement support for S3 and Rest
+// implement support for S3 and REST
 
 type Repository struct {
 	path     string
 	password string
 }
 
-// Connect creates a new instance of a exiting restic repository.
-func Connect(ctx context.Context, repoPath string, password string) (*Repository, error) {
-
-	repo := &Repository{
-		path:     repoPath,
+// Open returns a Repository handle for an existing repository.
+// It does not validate connectivity - use Validate() to check if the repository
+// is accessible and the password is correct.
+//
+// For local repositories, use a filesystem path. Future versions will support
+// S3 and REST backends.
+func Open(path, password string) *Repository {
+	return &Repository{
+		path:     path,
 		password: password,
 	}
-
-	_, err := repo.Snapshots(ctx)
-	if err != nil {
-		return nil, errors.New("failed to connect to restic repo")
-	}
-
-	return repo, nil
 }
 
-// Init initialize a new restic repository
-func Init(ctx context.Context, repoPath string, password string) (*Repository, error) {
+// Validate checks if the repository is accessible and the password is correct.
+// It performs a minimal operation (listing snapshots with --last flag) to verify connectivity.
+func (r *Repository) Validate(ctx context.Context) error {
+	_, err := r.command(ctx, "", "snapshots", "--json", "--last", "--no-lock")
+	if err != nil {
+		return fmt.Errorf("repository validation failed: %w", err)
+	}
+	return nil
+}
+
+// Init initializes a new restic repository at the specified path.
+// Returns an error if the repository already exists (see ErrRepoExists).
+func Init(ctx context.Context, path, password string) (*Repository, error) {
 	repo := &Repository{
-		path:     repoPath,
+		path:     path,
 		password: password,
 	}
 
@@ -62,10 +64,9 @@ func (r *Repository) init(ctx context.Context) (*Repository, error) {
 	return r, nil
 }
 
-// Backup backing up the given path
-func (r *Repository) Backup(ctx context.Context, path string, options ...backup.OptionFunc) (*BackupSummary, error) {
-
-	// Check the path
+// Backup creates a backup of the specified path.
+// The path must exist and be accessible. Use options to configure tags, exclusions, etc.
+func (r *Repository) Backup(ctx context.Context, path string, options ...BackupOption) (*BackupSummary, error) {
 	if path == "" {
 		return nil, errors.New("empty path")
 	}
@@ -76,8 +77,13 @@ func (r *Repository) Backup(ctx context.Context, path string, options ...backup.
 		return nil, err
 	}
 
+	var opts backupOptions
+	for _, opt := range options {
+		opt(&opts)
+	}
+
 	args := []string{"backup", "--json"}
-	args = append(args, backup.Args(options...)...)
+	args = append(args, opts.args()...)
 	args = append(args, ".")
 
 	out, err := r.command(ctx, path, args...)
@@ -91,20 +97,23 @@ func (r *Repository) Backup(ctx context.Context, path string, options ...backup.
 	}
 
 	var summary BackupSummary
-	err = json.Unmarshal(res, &summary)
-	if err != nil {
-		return nil, nil
+	if err := json.Unmarshal(res, &summary); err != nil {
+		return nil, fmt.Errorf("failed to parse backup summary: %w", err)
 	}
 
 	return &summary, nil
 }
 
 // Snapshots returns snapshots from the repository.
-// Fetches Snapshots in read only mode (--no-lock)
-func (r *Repository) Snapshots(ctx context.Context, filters ...filter.OptionFunc) ([]Snapshot, error) {
+// Fetches snapshots in read-only mode (--no-lock).
+func (r *Repository) Snapshots(ctx context.Context, filters ...FilterOption) ([]Snapshot, error) {
+	var opts filterOptions
+	for _, filter := range filters {
+		filter(&opts)
+	}
 
 	args := []string{"--no-lock", "snapshots", "--json"}
-	args = append(args, filter.Args(filters...)...)
+	args = append(args, opts.args()...)
 
 	sn, err := r.command(ctx, "", args...)
 	if err != nil {
@@ -112,19 +121,16 @@ func (r *Repository) Snapshots(ctx context.Context, filters ...filter.OptionFunc
 	}
 
 	var snapshots []Snapshot
-	err = json.Unmarshal([]byte(sn), &snapshots)
-	if err != nil {
-		return nil, err
+	if err := json.Unmarshal([]byte(sn), &snapshots); err != nil {
+		return nil, fmt.Errorf("failed to parse snapshots: %w", err)
 	}
 
 	return snapshots, nil
 }
 
-// SnapshotById returns the snapshot with given id from the repository
+// SnapshotById returns the snapshot with the given ID from the repository.
 func (r *Repository) SnapshotById(ctx context.Context, id string) (*Snapshot, error) {
-
-	args := []string{"snapshots", "--json"}
-	args = append(args, id)
+	args := []string{"snapshots", "--json", id}
 
 	sn, err := r.command(ctx, "", args...)
 	if err != nil {
@@ -132,24 +138,24 @@ func (r *Repository) SnapshotById(ctx context.Context, id string) (*Snapshot, er
 	}
 
 	var snapshots []*Snapshot
-	err = json.Unmarshal([]byte(sn), &snapshots)
-	if err != nil {
-		return nil, err
+	if err := json.Unmarshal([]byte(sn), &snapshots); err != nil {
+		return nil, fmt.Errorf("failed to parse snapshot: %w", err)
 	}
 
 	if len(snapshots) < 1 {
-		return nil, fmt.Errorf("no snapshot wiht id '%s'", id)
+		return nil, fmt.Errorf("no snapshot with id '%s'", id)
 	}
 
 	return snapshots[0], nil
 }
 
 var (
-	idRegex regexp.Regexp = *regexp.MustCompile(`(^latest(:.*)?$|^[0-9a-f]{8}(:.*)?$|^[0-9a-f]{64}(:.*)?$)`)
+	idRegex = regexp.MustCompile(`(^latest(:.*)?$|^[0-9a-f]{8}(:.*)?$|^[0-9a-f]{64}(:.*)?$)`)
 )
 
-// Restore restores a specific snapshot
-func (r *Repository) Restore(ctx context.Context, snapshotID string, target string, options ...restore.OptionFunc) (*RestoreSummary, error) {
+// Restore restores a specific snapshot to the target directory.
+// The target directory will be created if it doesn't exist.
+func (r *Repository) Restore(ctx context.Context, snapshotID string, target string, options ...RestoreOption) (*RestoreSummary, error) {
 	if target == "" {
 		return nil, errors.New("no target path")
 	}
@@ -165,12 +171,17 @@ func (r *Repository) Restore(ctx context.Context, snapshotID string, target stri
 	}
 
 	if !isSnapshotID(snapshotID) {
-		return nil, errors.New("invalid snapshot ID")
+		return nil, ErrInvalidID
+	}
+
+	var opts restoreOptions
+	for _, opt := range options {
+		opt(&opts)
 	}
 
 	args := []string{"restore", snapshotID, "--target", target, "--json"}
+	args = append(args, opts.args()...)
 
-	args = append(args, restore.Args(options...)...)
 	out, err := r.command(ctx, "", args...)
 	if err != nil {
 		return nil, err
@@ -182,29 +193,32 @@ func (r *Repository) Restore(ctx context.Context, snapshotID string, target stri
 	}
 
 	var summary RestoreSummary
-	err = json.Unmarshal(res, &summary)
-	if err != nil {
-		return nil, nil
+	if err := json.Unmarshal(res, &summary); err != nil {
+		return nil, fmt.Errorf("failed to parse restore summary: %w", err)
 	}
 
 	return &summary, nil
 }
 
-// Forget forgets a snapshot.
-// If a snapshot ID is given, some option will be ignored by restic.
-// E.g. --host, --tag and --path. See documentation: https://restic.readthedocs.io/en/stable/060_forget.html#remove-a-single-snapshot
-func (r *Repository) Forget(ctx context.Context, options ...forget.OptionFunc) ([]ForgetSummary, error) {
-
+// Forget removes snapshots from the repository based on the specified options.
+// At least one option must be specified.
+//
+// Note: If a snapshot ID is given via ForgetSnapshot(), some filtering options
+// (--host, --tag, --path) will be ignored by restic.
+// See: https://restic.readthedocs.io/en/stable/060_forget.html#remove-a-single-snapshot
+func (r *Repository) Forget(ctx context.Context, options ...ForgetOption) ([]ForgetSummary, error) {
 	if len(options) == 0 {
 		return nil, errors.New("at least one option must be set")
 	}
 
-	args := []string{
-		"--json", // json output seems not supported yet, so there is no output with exit 0
-		"forget",
+	var opts forgetOptions
+	for _, opt := range options {
+		opt(&opts)
 	}
 
-	args = append(args, forget.Args(options...)...)
+	args := []string{"--json", "forget"}
+	args = append(args, opts.args()...)
+
 	out, err := r.command(ctx, "", args...)
 	if err != nil {
 		return nil, err
@@ -215,19 +229,20 @@ func (r *Repository) Forget(ctx context.Context, options ...forget.OptionFunc) (
 		return nil, err
 	}
 
+	// Note: restic's forget command has limited JSON support.
+	// If JSON parsing fails but command succeeded, the operation completed successfully.
 	var summary []ForgetSummary
-	err = json.Unmarshal(data, &summary)
-	if err != nil {
-		// as long --json is not supported on forget, we return nil, nil
-		return nil, nil
+	if err := json.Unmarshal(data, &summary); err != nil {
+		// Command succeeded but JSON parsing failed - this is expected for some restic versions
+		return nil, fmt.Errorf("forget operation completed but JSON parsing failed (restic version may have limited JSON support): %w", err)
 	}
 
 	return summary, nil
 }
 
-// Unlock remove locks other processes created on the repository
+// Unlock removes locks that other processes created on the repository.
+// This is useful for cleaning up stale locks after a crash or interrupted operation.
 func (r *Repository) Unlock(ctx context.Context) error {
-	// TODO: remove all as option
 	args := []string{"unlock", "--remove-all", "--json"}
 
 	_, err := r.command(ctx, "", args...)
@@ -240,6 +255,10 @@ func (r *Repository) Unlock(ctx context.Context) error {
 
 // command wraps the restic command and injects repo and password as environment variables to the process
 func (r *Repository) command(ctx context.Context, dir string, args ...string) (string, error) {
+	// Check restic binary and version before executing any command
+	if err := checkResticVersion(); err != nil {
+		return "", fmt.Errorf("restic validation failed: %w", err)
+	}
 
 	envArgs := []string{
 		"RESTIC_PASSWORD=" + r.password,
@@ -276,24 +295,23 @@ func (r *Repository) command(ctx context.Context, dir string, args ...string) (s
 	return stdOut.String(), nil
 }
 
-var (
-	ErrRepoAlreadyExist error = errors.New("restic repo already exist, use restic.Connect")
-	ErrInvalidID        error = errors.New("invalid snapshot ID")
-	ErrRepoLocked       error = errors.New("repository is already locked")
-)
-
-// parseStdErr parses the stderr output from the restic command
+// parseStdErr parses the stderr output from the restic command and returns appropriate errors.
 func parseStdErr(stdErr string) error {
 	switch {
-	case strings.Contains(stdErr, "failed: config file already exists"):
-		return ErrRepoAlreadyExist
+	case strings.Contains(stdErr, "config file already exists"):
+		return ErrRepoExists
+	case strings.Contains(stdErr, "wrong password") || strings.Contains(stdErr, "invalid password"):
+		return ErrInvalidPassword
+	case strings.Contains(stdErr, "Is there a repository at the following location?"):
+		return ErrRepoNotFound
+	case strings.Contains(stdErr, "unable to create lock in backend") ||
+		strings.Contains(stdErr, "repository is already locked"):
+		return ErrRepoLocked
 	case strings.Contains(stdErr, "returned error, retrying after"):
 		return ErrInvalidID
-	case strings.Contains(stdErr, "unable to create lock in backend: repository is already locked"):
-		return ErrRepoLocked
+	default:
+		return fmt.Errorf("restic command failed: %s", stdErr)
 	}
-
-	return errors.New(stdErr)
 }
 
 // isPathExists checks if the path p exists
@@ -312,20 +330,33 @@ func isSnapshotID(id string) bool {
 }
 
 func getSummary(output string) ([]byte, error) {
-	reader := bufio.NewReader(strings.NewReader(output))
-	res := make([]byte, 0)
-	for {
-		line, _, err := reader.ReadLine()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, errors.New("failed to read output")
-		}
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	var lastSummaryLine []byte
 
-		if strings.Contains(string(line), "summary") || strings.Contains(string(line), `"tags":`) {
-			res = line
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		// Check for summary message_type
+		var msg struct {
+			MessageType string `json:"message_type"`
+		}
+		if err := json.Unmarshal(line, &msg); err == nil {
+			if msg.MessageType == "summary" {
+				return line, nil
+			}
+		}
+		// Fallback: check for tags field (for forget command)
+		if strings.Contains(string(line), `"tags":`) {
+			lastSummaryLine = append([]byte{}, line...)
 		}
 	}
-	return res, nil
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read output: %w", err)
+	}
+
+	if lastSummaryLine != nil {
+		return lastSummaryLine, nil
+	}
+
+	return nil, errors.New("no summary found in output")
 }
