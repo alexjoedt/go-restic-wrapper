@@ -16,6 +16,23 @@ import (
 // TODO:
 // implement support for S3 and REST
 
+// CommandHook is called before executing restic commands.
+// Useful for logging, metrics, or testing.
+// The hook receives the context and command arguments (excluding the binary name).
+type CommandHook func(ctx context.Context, args []string)
+
+var (
+	// commandHook is a global hook for command execution.
+	// Not safe for concurrent modification.
+	commandHook CommandHook
+)
+
+// SetCommandHook sets a global hook for command execution.
+// Pass nil to disable. Not safe for concurrent modification.
+func SetCommandHook(hook CommandHook) {
+	commandHook = hook
+}
+
 type Repository struct {
 	path     string
 	password string
@@ -234,7 +251,7 @@ func (r *Repository) Forget(ctx context.Context, options ...ForgetOption) ([]For
 	var summary []ForgetSummary
 	if err := json.Unmarshal(data, &summary); err != nil {
 		// Command succeeded but JSON parsing failed - this is expected for some restic versions
-		return nil, fmt.Errorf("forget operation completed but JSON parsing failed (restic version may have limited JSON support): %w", err)
+		return summary, fmt.Errorf("forget operation completed but JSON parsing failed (restic version may have limited JSON support): %w", err)
 	}
 
 	return summary, nil
@@ -253,43 +270,65 @@ func (r *Repository) Unlock(ctx context.Context) error {
 	return nil
 }
 
+const (
+	// maxOutputSize limits the size of stdout/stderr buffers to prevent OOM.
+	maxOutputSize = 100 * 1024 * 1024 // 100MB
+)
+
 // command wraps the restic command and injects repo and password as environment variables to the process
 func (r *Repository) command(ctx context.Context, dir string, args ...string) (string, error) {
+	// Validate repository state before executing
+	if r.path == "" {
+		return "", errors.New("repository path is empty")
+	}
+	if r.password == "" {
+		return "", errors.New("repository password is empty")
+	}
+
 	// Check restic binary and version before executing any command
 	if err := checkResticVersion(); err != nil {
 		return "", fmt.Errorf("restic validation failed: %w", err)
 	}
 
-	envArgs := []string{
-		"RESTIC_PASSWORD=" + r.password,
-		"RESTIC_REPOSITORY=" + r.path,
+	// Notify hook if set (for logging/metrics)
+	if commandHook != nil {
+		commandHook(ctx, args)
 	}
-
-	home, err := os.UserHomeDir()
-	if err == nil {
-		envArgs = append(envArgs, "HOME="+home)
-	}
-
-	envArgs = append(envArgs, "PATH="+os.Getenv("PATH"))
-
-	// buffers for output
-	stdErr := new(bytes.Buffer)
-	stdOut := new(bytes.Buffer)
 
 	cmd := exec.CommandContext(ctx, resticBin, args...)
 
-	// set the execute dir
+	// Set working directory if specified
 	if dir != "" {
 		cmd.Dir = dir
 	}
 
-	cmd.Env = envArgs
+	// Inherit parent environment and add restic-specific variables
+	cmd.Env = append(os.Environ(),
+		"RESTIC_PASSWORD="+r.password,
+		"RESTIC_REPOSITORY="+r.path,
+	)
+
+	// Use limited buffers to prevent OOM on large outputs
+	stdErr := &limitedBuffer{buf: new(bytes.Buffer), limit: maxOutputSize}
+	stdOut := &limitedBuffer{buf: new(bytes.Buffer), limit: maxOutputSize}
 	cmd.Stdout = stdOut
 	cmd.Stderr = stdErr
 
-	// run the command
-	if err := cmd.Run(); err != nil {
-		return "", parseStdErr(stdErr.String())
+	// Execute the command
+	err := cmd.Run()
+	if err != nil {
+		// Check if context was cancelled first
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("command cancelled: %w", ctx.Err())
+		}
+
+		// Try to parse stderr for known restic errors
+		if resticErr := parseStdErr(stdErr.String()); resticErr != nil {
+			return "", resticErr
+		}
+
+		// Unknown error - preserve both stderr and original error for debugging
+		return "", fmt.Errorf("restic command failed: %w (stderr: %s)", err, stdErr.String())
 	}
 
 	return stdOut.String(), nil
@@ -359,4 +398,21 @@ func getSummary(output string) ([]byte, error) {
 	}
 
 	return nil, errors.New("no summary found in output")
+}
+
+// limitedBuffer wraps a bytes.Buffer with a size limit to prevent OOM.
+type limitedBuffer struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
+	if lb.buf.Len()+len(p) > lb.limit {
+		return 0, fmt.Errorf("output exceeds limit of %d bytes", lb.limit)
+	}
+	return lb.buf.Write(p)
+}
+
+func (lb *limitedBuffer) String() string {
+	return lb.buf.String()
 }
